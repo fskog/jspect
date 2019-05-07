@@ -1,0 +1,351 @@
+﻿@using System.Text.RegularExpressions;
+@using System.Linq;
+@inject IJSRuntime Js;
+@page "/"
+@page "/specitor"
+
+<h1>Specitor</h1>
+
+
+<div id="specitor_input" class="editable" contenteditable="true"
+     style="width: 400px; height: 400px; background-color:honeydew; border: 1px solid #00ffff; overflow: auto;">@listMarkup</div>
+
+    <br />
+    <button class="btn btn-primary" onclick="@RequestJsCallback">Parse input</button>
+
+    <button class="btn btn-primary" onclick="@UpdateJson">Update Json</button>
+    <button class="btn btn-primary" onclick="@InitData">Init data</button>
+    <br /><br />
+
+    <h2>Input text</h2>
+<textarea readonly cols="70" rows="10">@textInput</textarea><br /><br />
+    <h2>Json data</h2>
+<textarea readonly cols="70" rows="10">@jsonResult</textarea>
+
+
+<textarea cols="40" rows="15" bind="@testParseInput"></textarea>
+    <button class="btn btn-primary" onclick="@ParseTest">Test Parse</button>
+
+
+
+    @functions {
+
+
+
+
+        // Text of textarea
+        string textInput;
+        string jsonResult;
+        string testParseInput;
+        MarkupString listMarkup = new MarkupString("<ul><li></li></ul>");
+
+        // Structure object to serialize into json
+        public jsonModel jmodel;
+
+
+        void InitData()
+        {
+            Console.WriteLine("Init model with sample data.");
+            var newModel = new jsonModel();
+
+            var item = new jsonItem();
+            item.Values.Add(new jsonValue("one", "1"));
+            item.Values.Add(new jsonValue("two", "2"));
+            item.Values.Add(new jsonValue("three", "3"));
+            item.Values.Add(new jsonValue("four", "4"));
+            item.Values.Add(new jsonValue("five", "5"));
+
+            newModel.Data = item;
+            jmodel = newModel;
+            listMarkup = RenderModelToHtml(jmodel);
+        }
+        void UpdateMarkup()
+        {
+            listMarkup = RenderModelToHtml(jmodel);
+        }
+
+        void UpdateJson()
+        {
+            jsonResult = ToJson(jmodel);
+        }
+
+        // Javascript call with input HTML
+        [JSInvokable]
+        public Task<string> ParseHtmlListAsync(string html)
+        {
+            Console.WriteLine($"Parsing html data: {html}");
+            ParseHtmlToModel(html);
+            return Task.FromResult($"Returned from ParseHtmlListAsync, sent data: {html}");
+        }
+
+        void ParseTest()
+        {
+            Console.WriteLine("ParseTesting...");
+            ParseHtmlToModel(testParseInput);
+        }
+
+        void RequestJsCallback()
+        {
+            Js.InvokeAsync<object>("Specitor.parseHtmlListAsyncJs", new DotNetObjectRef(this));
+        }
+
+
+
+        // Parse HTML -> object
+        public void ParseHtmlToModel(string html)
+        {
+            Console.WriteLine("ParseHtmlList...");
+            textInput = html;
+
+            #region HTML example
+            /*
+            <!--!-->
+            <ul style="list-style: circle; padding-left: 20px;">
+                <!--!-->
+                <li>one</li><!--!-->
+                <li>two</li><!--!-->
+                <li>three</li><!--!-->
+                <li>four</li><!--!-->
+                <li>five</li><!--!-->
+                <!--!-->
+            </ul><!--!-->
+            */
+            #endregion
+            #region HTML parse plan
+            /* Parse:
+                1. find root element = ul
+                2. find sublist = li -> ul
+                3. find values = li
+            */
+            #endregion
+            #region HTML structure
+            /*
+                <ul>
+                    <li>
+                        DATA
+                    </li>
+
+                    <li>
+                        DATA
+                    </li>
+                </ul>
+            */
+            #endregion
+
+
+            // find root ul
+            //   <ul>([\s\S]*)<\/ul>(?![\s\S]<li>)
+            // var r = new Regex("<ul>([\\s\\S]*)</ul>(?![\\s\\S]<li>)").Matches("asdasdasd<ul><li>One</li></ul><li>asdasda");
+            var htmlListRootItem = new Regex("<ul>([\\s\\S]*)</ul>(?![\\s\\S]<li>)").Matches(html).Cast<Match>();
+            var rootItemContent = htmlListRootItem.First().Groups["listitems"].Value;
+
+            jsonModel newModel = new jsonModel();
+            newModel.Data = ParseHtmlItemToModel(rootItemContent);
+
+            jmodel = newModel;
+            Console.WriteLine("Model was updated.");
+            // Re-render HTML from new model
+            listMarkup = RenderModelToHtml(jmodel);
+        }
+
+
+        protected jsonItem ParseHtmlItemToModel(string html)
+        {
+            /* 
+                <li>Something</li>
+            /* 
+                1. Extract name from <li> </li>
+                2. Get <ul>
+
+
+            NEW LIST FOUND --- <li>Name</li><ul> [result]               <li>([\s\S](?!<ul>))*</li><ul> 
+            FIND SUBLIST   --- <li>Name</li><ul> [result] 
+            FIND VALUES    --- (<li>[result]</li>NOT<ul>)*</ul>
+            FIND VALUES    ---
+            
+            1. While sublist is found  
+                2. While sublist is found
+            2. While values exists 
+                3. Parse values
+
+            */
+
+            jsonItem resultItem = new jsonItem();
+
+            // check for sublist until none are found
+            var unparsedHtml = html;
+            var sublistRegex = new Regex("(?'startpart'[\\s\\S]*^((?!<ul>|</ul>)))(<li>(?'itemname'.*)</li><ul>)(?'endpart'[\\s\\S]*)");
+            while (sublistRegex.Match(unparsedHtml).Success){
+                var match = sublistRegex.Match(unparsedHtml);
+                string itemName = match.Groups["itemname"].Value;
+                unparsedHtml = match.Groups["endpart"].Value;
+
+                jsonItem item = ParseHtmlItemToModel(unparsedHtml);
+                item.ItemName = itemName;
+                resultItem.ChildList.Add(item);
+            }
+
+            // no sublists found, check for values
+            ParseHtmlToValues(unparsedHtml);
+            // find all li /li until </ul> is found, then return
+
+
+            //(?'start'[\s\S]*^((?!<ul>|<\/ul>)))(<li>(?'itemname'.*)<\/li><ul>)(?'unparsed'[\s\S]*)
+
+            // (?'sublist'<li>(?'itemname'[\s\S](?!<ul>))*<\/li><ul>)(?'unparsed'[\s\S])
+            //.*^((?!<ul>|</ul>)).*(<li>(?'itemname'.*)</li><ul>)(?'unparsedHtml'[\s\S]*)
+
+            // check for values and parse
+            // html should only contain <li>word</li>(many times) until </ul>
+
+
+            return resultItem;
+        }
+
+
+        // Parse HTML li -> object Values
+        // Returns list of values for one html list level (li)
+        private List<jsonValue> ParseHtmlToValues(string html)
+        {
+            var valueList = new List<jsonValue>();
+            var matches = new Regex($@"(?:<li>)(?<value>\w*)(?:<\/li>)").Matches(html);
+            var values = matches.Cast<Match>().Select(m => m.Groups["value"].Value);
+
+            Console.WriteLine($"Parsing {matches.Count} values:");
+            foreach (string value in values)
+            {
+                Console.WriteLine($" --- Parsing value {value}");
+                valueList.Add(new jsonValue(value));
+            }
+            return valueList;
+        }
+
+
+
+
+        protected MarkupString RenderModelToHtml(jsonModel model)
+        {
+            #region ParseModel
+            /* ParseModel(model)
+                 * Check Data<item> object != null
+                 * 1. if Data.ChildList.Any()
+                 *      1.1 ParseItem
+                 * 2. if Data.Values.Any()
+                 *      2.1 ParseValues
+             */
+            #endregion
+
+            MarkupString startMarkup = new MarkupString("<ul>");
+            MarkupString dataMarkup = new MarkupString("");
+            MarkupString endMarkup = new MarkupString("</ul>");
+
+
+            if (model.Data != null)
+            {
+                dataMarkup = RenderItemToHtml(model.Data);
+            }
+
+            Console.WriteLine($"Generated HTML markup: ");
+            Console.WriteLine($"{startMarkup}{dataMarkup}{endMarkup}");
+
+            return new MarkupString($"{startMarkup}{dataMarkup}{endMarkup}");
+        }
+
+        protected MarkupString RenderItemToHtml(jsonItem item)
+        {
+            string startMarkup = $"<li>{item.ItemName}</li><ul>";
+            string subMarkup = "";
+            string endMarkup = "</ul>";
+
+
+            // Get subMarkup
+
+            // Values
+            foreach (jsonValue value in item.Values)
+            {
+                subMarkup += RenderValueToHtml(value);
+            }
+
+            // ChildList
+            foreach (jsonItem childItem in item.ChildList)
+            {
+                subMarkup += RenderItemToHtml(childItem);
+            }
+
+
+            // stich all markup together and return
+            return new MarkupString($"{startMarkup}{subMarkup}{endMarkup}");
+        }
+
+        protected MarkupString RenderValueToHtml(jsonValue value)
+        {
+            Console.WriteLine($"Rendering value {value.Value.Item1}");
+            return new MarkupString($"<li>{value.Value.Item1}</li>");
+        }
+
+
+        // serialize model to json
+        public string ToJson(jsonModel model)
+        {
+            return Json.Serialize(model);
+        }
+
+        /* Plan
+            1. editable text area (div contenteditable="true")
+            2. parse data structure and render html list inside text area
+            3. update structure/reparse text area on text update (new line/tab)
+            4. show serialized json code in other window (text area, uneditable)
+            5. buttons for copy json, insert json
+        */
+
+
+        // Structure class to serialize into json
+        public class jsonModel
+        {
+            public jsonItem Data;
+
+            public jsonModel()
+            {
+                Data = new jsonItem();
+
+            }
+        }
+
+        public class jsonItem
+        {
+            public string ItemName = "List:";
+            public List<jsonItem> ChildList;
+            public List<jsonValue> Values;
+
+            public jsonValue Value;
+
+            public jsonItem(string name = "List:")
+            {
+                ItemName = name;
+                ChildList = new List<jsonItem>();
+                Values = new List<jsonValue>();
+
+            }
+
+        }
+
+        public class jsonValue
+        {
+
+            public Tuple<string, string> Value;
+
+            public jsonValue()
+            {
+                Value = new Tuple<string, string>("", "");
+            }
+
+            public jsonValue(string key, string val = "")
+            {
+                Value = new Tuple<string, string>(key, val);
+            }
+
+
+        }
+
+
+    }
